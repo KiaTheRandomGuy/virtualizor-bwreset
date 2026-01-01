@@ -303,7 +303,33 @@ run_reset() {
 
     # Execute
     # We strip trailing empty lines to avoid issues with read
+    local xargs_status=0
+    set +e
     grep -v '^$' "$worklist" | xargs -P "$PARALLEL_JOBS" -L 1 -I {} bash -c 'worker_wrapper "$1"' _ "{}"
+    xargs_status=$?
+    set -e
+    if (( xargs_status != 0 )); then
+        log_error "One or more VPS operations failed (xargs exit $xargs_status)."
+    fi
+
+    local success_count=0
+    local skipped_count=0
+    local failed_count=0
+    local vps_log
+    if compgen -G "$LOGS_DIR/*.log" > /dev/null; then
+        for vps_log in "$LOGS_DIR"/*.log; do
+            if grep -q "\[ERROR\]" "$vps_log"; then
+                ((failed_count++))
+            elif grep -q "skipping" "$vps_log"; then
+                ((skipped_count++))
+            else
+                ((success_count++))
+            fi
+        done
+    else
+        log_error "No per-VPS logs were generated."
+        failed_count=$count
+    fi
 
     # Aggregate logs
     log_info "Aggregating logs..."
@@ -314,7 +340,16 @@ run_reset() {
         cat "$CHANGE_LOGS_DIR"/*.log >> "$CHANGE_LOG"
     fi
 
+    log_info "Summary: total=$count success=$success_count skipped=$skipped_count failed=$failed_count"
+    if (( failed_count > 0 )); then
+        log_error "Run completed with failures. Check $LOG_FILE for details."
+    fi
+
     log_info "Done."
+    if (( failed_count > 0 )) || (( xargs_status != 0 )); then
+        return 1
+    fi
+    return 0
 }
 
 run_manual_reset() {
