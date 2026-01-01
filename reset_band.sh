@@ -19,6 +19,7 @@ TEMP_DIR="/tmp/vps_manager_$(date +%s)_$$"
 
 # Default configuration values
 DEFAULT_JOBS=5
+CURL_INSECURE="${CURL_INSECURE:-0}"
 
 # --- Dependencies Check ---
 check_dependencies() {
@@ -46,6 +47,13 @@ log_error() {
     echo "$(date '+%F %T') [ERROR] $*" >&2
 }
 
+curl_insecure_flag() {
+    if [[ "${CURL_INSECURE:-0}" == "1" ]]; then
+        printf '%s' "--insecure"
+    fi
+    return 0
+}
+
 # --- Config Management ---
 load_config() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -53,6 +61,10 @@ load_config() {
     fi
     source "$CONFIG_FILE"
     PARALLEL_JOBS="${PARALLEL_JOBS:-$DEFAULT_JOBS}"
+    if [[ "${CURL_INSECURE:-0}" != "1" ]]; then
+        CURL_INSECURE=0
+    fi
+    export CURL_INSECURE
     return 0
 }
 
@@ -66,6 +78,8 @@ PASS=""
 API_BASE=""
 # Number of parallel processes for resetting
 PARALLEL_JOBS=5
+# Optional: set to 1 to disable TLS cert verification (not recommended)
+CURL_INSECURE=0
 EOF
 }
 
@@ -74,12 +88,14 @@ configure_script_ui() {
     local current_key="${KEY:-}"
     local current_pass="${PASS:-}"
     local current_jobs="${PARALLEL_JOBS:-$DEFAULT_JOBS}"
+    local current_insecure="${CURL_INSECURE:-0}"
 
-    local new_host new_key new_pass new_jobs
+    local new_host new_key new_pass new_jobs new_insecure
     new_host=$(whiptail --title "Configure Host" --inputbox "Virtualizor Host IP:" 8 78 "$current_host" 3>&1 1>&2 2>&3) || return 0
     new_key=$(whiptail --title "Configure API Key" --inputbox "API Key:" 8 78 "$current_key" 3>&1 1>&2 2>&3) || return 0
     new_pass=$(whiptail --title "Configure API Pass" --inputbox "API Password:" 8 78 "$current_pass" 3>&1 1>&2 2>&3) || return 0
     new_jobs=$(whiptail --title "Parallel Jobs" --inputbox "Number of parallel jobs:" 8 78 "$current_jobs" 3>&1 1>&2 2>&3) || return 0
+    new_insecure=$(whiptail --title "TLS Verification" --inputbox "Disable TLS verification? (0 or 1):" 8 78 "$current_insecure" 3>&1 1>&2 2>&3) || return 0
 
     cat > "$CONFIG_FILE" <<EOF
 HOST="$new_host"
@@ -87,6 +103,7 @@ KEY="$new_key"
 PASS="$new_pass"
 API_BASE=""
 PARALLEL_JOBS=$new_jobs
+CURL_INSECURE=$new_insecure
 EOF
     whiptail --msgbox "Configuration saved to $CONFIG_FILE" 8 78
 }
@@ -111,9 +128,9 @@ api_request() {
     local post_data="${2:-}"
 
     if [[ -n "$post_data" ]]; then
-        curl -sS -L --max-redirs 5 --retry 3 -d "$post_data" "$url"
+        curl -sS -L --max-redirs 5 --retry 3 $(curl_insecure_flag) -d "$post_data" "$url"
     else
-        curl -sS -L --max-redirs 5 --retry 3 "$url"
+        curl -sS -L --max-redirs 5 --retry 3 $(curl_insecure_flag) "$url"
     fi
 }
 
@@ -201,7 +218,7 @@ process_vps_worker() {
     if (( limit == 0 )); then
         log_info "$vpsid → unlimited plan. Resetting usage only."
         local res
-        res=$(curl -sS -X POST "${api_base}&act=vs&bwreset=${vpsid}&api=json")
+        res=$(curl -sS $(curl_insecure_flag) -X POST "${api_base}&act=vs&bwreset=${vpsid}&api=json")
         if echo "$res" | jq -e '.done // 0' | grep -q 1; then
             log_info "$vpsid → usage reset OK"
         else
@@ -230,7 +247,7 @@ process_vps_worker() {
 
     # Reset
     local res
-    res=$(curl -sS -X POST "${api_base}&act=vs&bwreset=${vpsid}&api=json")
+    res=$(curl -sS $(curl_insecure_flag) -X POST "${api_base}&act=vs&bwreset=${vpsid}&api=json")
     if ! echo "$res" | jq -e '.done // 0' | grep -q 1; then
         log_error "$vpsid → reset failed: $res"
         return 1
@@ -238,7 +255,7 @@ process_vps_worker() {
 
     # Update
     local u_res
-    u_res=$(curl -sS -d "editvps=1" -d "bandwidth=$new_limit" -d "plid=${plid}" "${api_base}&act=managevps&vpsid=${vpsid}&api=json")
+    u_res=$(curl -sS $(curl_insecure_flag) -d "editvps=1" -d "bandwidth=$new_limit" -d "plid=${plid}" "${api_base}&act=managevps&vpsid=${vpsid}&api=json")
 
     if echo "$u_res" | jq -e '.done.done // false' | grep -q true; then
         log_info "Limit updated (plan $plid preserved)"
@@ -250,7 +267,7 @@ process_vps_worker() {
         return 1
     fi
 }
-export -f process_vps_worker log_info log_error
+export -f process_vps_worker log_info log_error curl_insecure_flag
 
 worker_wrapper() {
     # Unpack line: "101 1000 500 1"
@@ -265,6 +282,10 @@ run_reset() {
     local target="$1" # "all" or vpsid
     local api_base
     api_base=$(get_api_base)
+
+    if [[ "${CURL_INSECURE:-0}" == "1" ]]; then
+        log_info "TLS verification disabled (CURL_INSECURE=1)."
+    fi
 
     log_info "Fetching VPS data..."
     local vs_json
