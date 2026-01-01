@@ -97,7 +97,8 @@ load_config() {
     if [[ "${LOG_API_RESPONSES:-1}" != "1" ]]; then
         LOG_API_RESPONSES=0
     fi
-    export CURL_INSECURE LOG_API_RESPONSES
+    LOG_API_MAX_CHARS="${LOG_API_MAX_CHARS:-2000}"
+    export CURL_INSECURE LOG_API_RESPONSES LOG_API_MAX_CHARS
     return 0
 }
 
@@ -273,8 +274,7 @@ process_vps_worker() {
     local used="$3"
     local plid="$4"
     local api_base="$5"
-    local log_file="$6"
-    local change_log_file="$7"
+    local change_log_file="$6"
     local curl_insecure=""
 
     wlog_info() {
@@ -283,13 +283,35 @@ process_vps_worker() {
     wlog_error() {
         echo "$(date '+%F %T') [ERROR] $*"
     }
+    wlog_payload() {
+        local label="$1"
+        local payload="${2:-}"
+        local max="${LOG_API_MAX_CHARS:-2000}"
+        local len=${#payload}
+
+        if (( len == 0 )); then
+            wlog_info "$label (empty)"
+            return 0
+        fi
+
+        if (( len > max )); then
+            wlog_info "$label (truncated, ${len} chars)"
+            payload="${payload:0:max}"
+        else
+            wlog_info "$label (${len} chars)"
+        fi
+
+        while IFS= read -r line; do
+            wlog_info "$line"
+        done <<< "$payload"
+    }
+    wlog_mask_url() {
+        echo "$1" | sed -E 's/(adminapikey=)[^&]*/\1REDACTED/g; s/(adminapipass=)[^&]*/\1REDACTED/g'
+    }
 
     if [[ "${CURL_INSECURE:-0}" == "1" ]]; then
         curl_insecure="--insecure"
     fi
-
-    # Redirect output to log file
-    exec > "$log_file" 2>&1
 
     wlog_info "─ VPS $vpsid"
 
@@ -298,15 +320,18 @@ process_vps_worker() {
         wlog_info "$vpsid → unlimited plan. Resetting usage only."
         local res curl_status
         set +e
-        res=$(curl -sS $curl_insecure -X POST "${api_base}&act=vs&bwreset=${vpsid}&api=json" 2>&1)
+        local reset_url="${api_base}&act=vs&bwreset=${vpsid}&api=json"
+        wlog_info "$vpsid → reset request: $(wlog_mask_url "$reset_url")"
+        res=$(curl -sS $curl_insecure -X POST "$reset_url" 2>&1)
         curl_status=$?
         set -e
         if (( curl_status != 0 )); then
-            wlog_error "$vpsid → reset failed (curl exit $curl_status): $res"
+            wlog_error "$vpsid → reset failed (curl exit $curl_status)"
+            wlog_payload "$vpsid → reset error response" "$res"
             return 1
         fi
         if [[ "${LOG_API_RESPONSES:-1}" == "1" ]]; then
-            wlog_info "$vpsid → reset response: $res"
+            wlog_payload "$vpsid → reset response" "$res"
         fi
         if echo "$res" | jq -e '.done // 0' | grep -q 1; then
             wlog_info "$vpsid → usage reset OK"
@@ -337,15 +362,18 @@ process_vps_worker() {
     # Reset
     local res curl_status
     set +e
-    res=$(curl -sS $curl_insecure -X POST "${api_base}&act=vs&bwreset=${vpsid}&api=json" 2>&1)
+    local reset_url="${api_base}&act=vs&bwreset=${vpsid}&api=json"
+    wlog_info "$vpsid → reset request: $(wlog_mask_url "$reset_url")"
+    res=$(curl -sS $curl_insecure -X POST "$reset_url" 2>&1)
     curl_status=$?
     set -e
     if (( curl_status != 0 )); then
-        wlog_error "$vpsid → reset failed (curl exit $curl_status): $res"
+        wlog_error "$vpsid → reset failed (curl exit $curl_status)"
+        wlog_payload "$vpsid → reset error response" "$res"
         return 1
     fi
     if [[ "${LOG_API_RESPONSES:-1}" == "1" ]]; then
-        wlog_info "$vpsid → reset response: $res"
+        wlog_payload "$vpsid → reset response" "$res"
     fi
     if ! echo "$res" | jq -e '.done // 0' | grep -q 1; then
         wlog_error "$vpsid → reset failed: $res"
@@ -355,15 +383,19 @@ process_vps_worker() {
     # Update
     local u_res
     set +e
-    u_res=$(curl -sS $curl_insecure -d "editvps=1" -d "bandwidth=$new_limit" -d "plid=${plid}" "${api_base}&act=managevps&vpsid=${vpsid}&api=json" 2>&1)
+    local update_url="${api_base}&act=managevps&vpsid=${vpsid}&api=json"
+    local update_payload="editvps=1 bandwidth=$new_limit plid=$plid"
+    wlog_info "$vpsid → update request: $(wlog_mask_url "$update_url") payload: $update_payload"
+    u_res=$(curl -sS $curl_insecure -d "editvps=1" -d "bandwidth=$new_limit" -d "plid=${plid}" "$update_url" 2>&1)
     curl_status=$?
     set -e
     if (( curl_status != 0 )); then
-        wlog_error "$vpsid → update failed (curl exit $curl_status): $u_res"
+        wlog_error "$vpsid → update failed (curl exit $curl_status)"
+        wlog_payload "$vpsid → update error response" "$u_res"
         return 1
     fi
     if [[ "${LOG_API_RESPONSES:-1}" == "1" ]]; then
-        wlog_info "$vpsid → update response: $u_res"
+        wlog_payload "$vpsid → update response" "$u_res"
     fi
 
     if echo "$u_res" | jq -e '.done.done // false' | grep -q true; then
@@ -381,8 +413,34 @@ export -f process_vps_worker
 worker_wrapper() {
     # Unpack line: "101 1000 500 1"
     read -r vpsid limit used plid <<< "$1"
-    # Paths exported
-    process_vps_worker "$vpsid" "$limit" "$used" "$plid" "$API_BASE_VAL" "${LOGS_DIR}/${vpsid}.log" "${CHANGE_LOGS_DIR}/${vpsid}.log"
+    local logs_dir="${LOGS_DIR:-}"
+    local change_logs_dir="${CHANGE_LOGS_DIR:-}"
+
+    if [[ -z "$vpsid" ]]; then
+        echo "$(date '+%F %T') [ERROR] Invalid worklist line: '$1'"
+        return 1
+    fi
+    if [[ -z "$logs_dir" || -z "$change_logs_dir" ]]; then
+        echo "$(date '+%F %T') [ERROR] LOGS_DIR/CHANGE_LOGS_DIR not set."
+        return 1
+    fi
+
+    local log_file="${logs_dir}/${vpsid}.log"
+    local change_log_file="${change_logs_dir}/${vpsid}.log"
+
+    {
+        echo "$(date '+%F %T') [INFO]  Worker start: vpsid=$vpsid limit=$limit used=$used plid=$plid"
+        set +e
+        process_vps_worker "$vpsid" "$limit" "$used" "$plid" "$API_BASE_VAL" "$change_log_file"
+        local status=$?
+        set -e
+        if (( status != 0 )); then
+            echo "$(date '+%F %T') [ERROR] WORKER_EXIT=$status"
+        else
+            echo "$(date '+%F %T') [INFO]  WORKER_EXIT=0"
+        fi
+        exit $status
+    } > "$log_file" 2>&1
 }
 export -f worker_wrapper
 
@@ -438,12 +496,17 @@ run_reset() {
     # Execute
     # We strip trailing empty lines to avoid issues with read
     local xargs_status=0
+    local xargs_err="${TEMP_DIR}/xargs.err"
+    : > "$xargs_err"
     set +e
-    grep -v '^$' "$worklist" | xargs -P "$PARALLEL_JOBS" -I {} bash -c 'worker_wrapper "$1"' _ "{}"
+    grep -v '^$' "$worklist" | xargs -P "$PARALLEL_JOBS" -I {} bash -c 'worker_wrapper "$1"' _ "{}" 2> "$xargs_err"
     xargs_status=$?
     set -e
     if (( xargs_status != 0 )); then
         log_error "One or more VPS operations failed (xargs exit $xargs_status)."
+    fi
+    if [[ -s "$xargs_err" ]]; then
+        log_payload "xargs stderr" "$(cat "$xargs_err")"
     fi
 
     local success_count=0
@@ -454,9 +517,19 @@ run_reset() {
         for vps_log in "$LOGS_DIR"/*.log; do
             if [[ ! -s "$vps_log" ]]; then
                 ((failed_count++))
-            elif grep -q "\[ERROR\]" "$vps_log"; then
+                continue
+            fi
+
+            local worker_exit
+            worker_exit=$(awk -F= '/WORKER_EXIT=/ {print $2; exit}' "$vps_log")
+            if [[ -z "$worker_exit" ]]; then
                 ((failed_count++))
-            elif grep -q "skipping" "$vps_log"; then
+                continue
+            fi
+
+            if (( worker_exit != 0 )); then
+                ((failed_count++))
+            elif grep -q "SKIPPED" "$vps_log" || grep -q "skipping" "$vps_log"; then
                 ((skipped_count++))
             else
                 ((success_count++))
@@ -479,6 +552,8 @@ run_reset() {
     log_info "Summary: total=$count success=$success_count skipped=$skipped_count failed=$failed_count"
     if (( failed_count > 0 )); then
         log_error "Run completed with failures. Check $LOG_FILE for details."
+    elif (( xargs_status != 0 )); then
+        log_error "xargs reported a failure, but no failed workers were detected."
     fi
 
     log_info "Done."
