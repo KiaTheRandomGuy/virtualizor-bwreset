@@ -399,6 +399,31 @@ process_vps_worker() {
     wlog_mask_url() {
         echo "$1" | sed -E 's/(adminapikey=)[^&]*/\1REDACTED/g; s/(adminapipass=)[^&]*/\1REDACTED/g'
     }
+    wcurl() {
+        local url="$1"
+        shift
+        local out status
+
+        set +e
+        out=$(curl -sS $curl_insecure "$@" "$url" 2>&1)
+        status=$?
+        set -e
+
+        if (( status == 60 )) && [[ "$curl_insecure" != "--insecure" ]]; then
+            wlog_error "SSL verification failed; retrying with --insecure."
+            set +e
+            out=$(curl -sS --insecure "$@" "$url" 2>&1)
+            status=$?
+            set -e
+            if (( status == 0 )); then
+                curl_insecure="--insecure"
+                wlog_info "TLS verification disabled for this worker."
+            fi
+        fi
+
+        printf '%s' "$out"
+        return $status
+    }
     normalize_bw_int() {
         local raw="$1"
         local label="$2"
@@ -438,7 +463,7 @@ process_vps_worker() {
         set +e
         local reset_url="${api_base}&act=vs&bwreset=${vpsid}&api=json"
         wlog_info "$vpsid → reset request: $(wlog_mask_url "$reset_url")"
-        res=$(curl -sS $curl_insecure -X POST "$reset_url" 2>&1)
+        res=$(wcurl "$reset_url" -X POST)
         curl_status=$?
         set -e
         if (( curl_status != 0 )); then
@@ -480,7 +505,7 @@ process_vps_worker() {
     set +e
     local reset_url="${api_base}&act=vs&bwreset=${vpsid}&api=json"
     wlog_info "$vpsid → reset request: $(wlog_mask_url "$reset_url")"
-    res=$(curl -sS $curl_insecure -X POST "$reset_url" 2>&1)
+    res=$(wcurl "$reset_url" -X POST)
     curl_status=$?
     set -e
     if (( curl_status != 0 )); then
@@ -502,7 +527,7 @@ process_vps_worker() {
     local update_url="${api_base}&act=managevps&vpsid=${vpsid}&api=json"
     local update_payload="editvps=1 bandwidth=$new_limit plid=$plid"
     wlog_info "$vpsid → update request: $(wlog_mask_url "$update_url") payload: $update_payload"
-    u_res=$(curl -sS $curl_insecure -d "editvps=1" -d "bandwidth=$new_limit" -d "plid=${plid}" "$update_url" 2>&1)
+    u_res=$(wcurl "$update_url" -d "editvps=1" -d "bandwidth=$new_limit" -d "plid=${plid}")
     curl_status=$?
     set -e
     if (( curl_status != 0 )); then
@@ -571,6 +596,31 @@ process_vps_worker_report() {
         s="${s#"${s%%[![:space:]]*}"}"
         s="${s%"${s##*[![:space:]]}"}"
         echo "$s"
+    }
+    wcurl() {
+        local url="$1"
+        shift
+        local out status
+
+        set +e
+        out=$(curl -sS $curl_insecure "$@" "$url" 2>&1)
+        status=$?
+        set -e
+
+        if (( status == 60 )) && [[ "$curl_insecure" != "--insecure" ]]; then
+            wlog_error "SSL verification failed; retrying with --insecure."
+            set +e
+            out=$(curl -sS --insecure "$@" "$url" 2>&1)
+            status=$?
+            set -e
+            if (( status == 0 )); then
+                curl_insecure="--insecure"
+                wlog_info "TLS verification disabled for this worker."
+            fi
+        fi
+
+        printf '%s' "$out"
+        return $status
     }
     normalize_int() {
         local raw="$1"
@@ -679,7 +729,7 @@ process_vps_worker_report() {
         set +e
         local reset_url="${api_base}&act=vs&bwreset=${vpsid}&api=json"
         wlog_info "$vpsid → reset request: $(wlog_mask_url "$reset_url")"
-        res=$(curl -sS $curl_insecure -X POST "$reset_url" 2>&1)
+        res=$(wcurl "$reset_url" -X POST)
         curl_status=$?
         set -e
         if (( curl_status != 0 )); then
@@ -713,7 +763,7 @@ process_vps_worker_report() {
     set +e
     local reset_url="${api_base}&act=vs&bwreset=${vpsid}&api=json"
     wlog_info "$vpsid → reset request: $(wlog_mask_url "$reset_url")"
-    res=$(curl -sS $curl_insecure -X POST "$reset_url" 2>&1)
+    res=$(wcurl "$reset_url" -X POST)
     curl_status=$?
     set -e
     if (( curl_status != 0 )); then
@@ -735,7 +785,7 @@ process_vps_worker_report() {
     local update_url="${api_base}&act=managevps&vpsid=${vpsid}&api=json"
     local update_payload="editvps=1 bandwidth=$remaining plid=$plid"
     wlog_info "$vpsid → update request: $(wlog_mask_url "$update_url") payload: $update_payload"
-    u_res=$(curl -sS $curl_insecure -d "editvps=1" -d "bandwidth=$remaining" -d "plid=${plid}" "$update_url" 2>&1)
+    u_res=$(wcurl "$update_url" -d "editvps=1" -d "bandwidth=$remaining" -d "plid=${plid}")
     curl_status=$?
     set -e
     if (( curl_status != 0 )); then
