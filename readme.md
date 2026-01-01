@@ -76,7 +76,7 @@ git -C /root/virtualizor-bwreset pull
 
 * **Configure:** Edit your API credentials.
 
-* **Manual Reset:** Uses `vps_report.txt` to set each VPS limit to the reported remaining bandwidth. If the remaining value is `0`, it sets the limit to `1 GB` (to avoid unlimited). VPSs with unlimited limits (`0`) are still reset.
+* **Manual Reset:** Uses `vps_report.txt` to set each VPS limit to the reported remaining bandwidth. If the remaining value is `0`, it sets the limit to `1 GB` (to avoid unlimited). It does **not** reset usage in manual mode; VPSs with unlimited limits (`0`) are left unchanged.
 
 * **Manage Automation:**
 

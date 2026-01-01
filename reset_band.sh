@@ -716,7 +716,7 @@ process_vps_worker_report() {
         wlog_info "$vpsid → report match: $match_ip remaining=$remaining_raw"
     else
         if (( limit == 0 )); then
-            wlog_info "$vpsid → no report entry for IPs ($iplist); continuing with reset only"
+            wlog_info "$vpsid → no report entry for IPs ($iplist); no changes in manual mode"
         else
             wlog_error "$vpsid → no report entry for IPs ($iplist)"
             return 1
@@ -724,28 +724,7 @@ process_vps_worker_report() {
     fi
 
     if (( limit == 0 )); then
-        wlog_info "$vpsid → unlimited plan (limit=0). Resetting usage only."
-        local res curl_status
-        set +e
-        local reset_url="${api_base}&act=vs&bwreset=${vpsid}&api=json"
-        wlog_info "$vpsid → reset request: $(wlog_mask_url "$reset_url")"
-        res=$(wcurl "$reset_url" -X POST)
-        curl_status=$?
-        set -e
-        if (( curl_status != 0 )); then
-            wlog_error "$vpsid → reset failed (curl exit $curl_status)"
-            wlog_payload "$vpsid → reset error response" "$res"
-            return 1
-        fi
-        if [[ "${LOG_API_RESPONSES:-1}" == "1" ]]; then
-            wlog_payload "$vpsid → reset response" "$res"
-        fi
-        if echo "$res" | jq -e '.done // 0' | grep -q 1; then
-            wlog_info "$vpsid → usage reset OK"
-        else
-            wlog_error "$vpsid → reset failed: $res"
-            return 1
-        fi
+        wlog_info "$vpsid → unlimited plan (limit=0). No changes in manual mode."
         return 0
     fi
 
@@ -756,30 +735,9 @@ process_vps_worker_report() {
 
     local remaining
     remaining=$(normalize_remaining "$remaining_raw") || return 1
-    wlog_info "$vpsid → setting limit to remaining: $remaining GB"
+    wlog_info "$vpsid → setting limit to remaining: $remaining GB (no usage reset)"
 
-    # Reset
-    local res curl_status
-    set +e
-    local reset_url="${api_base}&act=vs&bwreset=${vpsid}&api=json"
-    wlog_info "$vpsid → reset request: $(wlog_mask_url "$reset_url")"
-    res=$(wcurl "$reset_url" -X POST)
-    curl_status=$?
-    set -e
-    if (( curl_status != 0 )); then
-        wlog_error "$vpsid → reset failed (curl exit $curl_status)"
-        wlog_payload "$vpsid → reset error response" "$res"
-        return 1
-    fi
-    if [[ "${LOG_API_RESPONSES:-1}" == "1" ]]; then
-        wlog_payload "$vpsid → reset response" "$res"
-    fi
-    if ! echo "$res" | jq -e '.done // 0' | grep -q 1; then
-        wlog_error "$vpsid → reset failed: $res"
-        return 1
-    fi
-
-    # Update
+    # Update limit only (manual mode does not reset usage)
     local u_res
     set +e
     local update_url="${api_base}&act=managevps&vpsid=${vpsid}&api=json"
@@ -801,7 +759,7 @@ process_vps_worker_report() {
         wlog_info "Limit updated (plan $plid preserved)"
         local date_str
         date_str=$(date '+%F %T')
-        printf "%s  VPS %s  => 0/%d (plan %d)\n" "$date_str" "$vpsid" "$remaining" "$plid" >> "$change_log_file"
+        printf "%s  VPS %s  LIMIT set to %d GB (plan %d)\n" "$date_str" "$vpsid" "$remaining" "$plid" >> "$change_log_file"
     else
         wlog_error "$vpsid → update failed: $u_res"
         return 1
