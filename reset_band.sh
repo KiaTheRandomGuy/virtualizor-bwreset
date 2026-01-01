@@ -953,15 +953,18 @@ run_manual_reset_report() {
 
     mkdir -p "$TEMP_DIR"
     local worklist="${TEMP_DIR}/worklist.txt"
-    local jq_iplist='def to_list(v):
-        if v == null then []
-        elif (v|type) == "string" then ([v] + (v|split(",")))
-        elif (v|type) == "array" then v
-        elif (v|type) == "object" then (v|keys)
-        else [] end;
+    local jq_iplist='def ip_re: "^[0-9]{1,3}(\\.[0-9]{1,3}){3}$";
         def clean_ips(a):
-        a | map(tostring) | map(gsub("\\s+";"")) | map(select(test("^[0-9]{1,3}(\\.[0-9]{1,3}){3}$")));
-        def iplist: ([.ip] + to_list(.ips)) | clean_ips(.) | unique | join(",");'
+        a | map(tostring) | map(gsub("\\s+";"")) | map(select(test(ip_re)));
+        def ips_from_ip:
+        clean_ips([.ip]);
+        def ips_from_ips:
+        if (.ips // empty | type) == "object" then
+            clean_ips( [(.ips | keys[]?)] + [(.ips | .. | strings)] )
+        else
+            clean_ips( [(.ips // empty | .. | strings)] )
+        end;
+        def iplist: (ips_from_ip + ips_from_ips) | unique | join(",");'
 
     if [[ "$target" == "all" ]]; then
         echo "$vs_json" | jq -r "${jq_iplist} .vs[] | \"\\(.vpsid) \\(.bandwidth//0) \\(.plid//0) \\(iplist)\"" > "$worklist"
@@ -971,6 +974,7 @@ run_manual_reset_report() {
              log_error "VPS $target not found in list."
              return 1
         fi
+        log_payload "VPS $target IP fields" "$(echo "$vs_json" | jq -c --arg id "$target" '.vs[$id] | with_entries(select(.key|test("ip")) )')"
     fi
 
     local count
