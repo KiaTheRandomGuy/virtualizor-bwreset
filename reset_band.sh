@@ -228,12 +228,15 @@ api_request() {
 build_report_map() {
     local report_file="$1"
     local map_file="$2"
+    local map_dir
 
     if [[ ! -f "$report_file" ]]; then
         log_error "Report file not found: $report_file"
         return 1
     fi
 
+    map_dir="$(dirname "$map_file")"
+    mkdir -p "$map_dir"
     : > "$map_file"
     local line ips_part remaining_raw
     local count=0
@@ -937,6 +940,7 @@ run_manual_reset_report() {
         log_info "API response logging enabled."
     fi
 
+    mkdir -p "$TEMP_DIR"
     local report_map="${TEMP_DIR}/report_map.txt"
     if ! build_report_map "$REPORT_FILE" "$report_map"; then
         return 1
