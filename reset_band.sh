@@ -270,8 +270,8 @@ fetch_vps_data() {
 # --- Worker Logic ---
 process_vps_worker() {
     local vpsid="$1"
-    local limit="$2"
-    local used="$3"
+    local limit_raw="$2"
+    local used_raw="$3"
     local plid="$4"
     local api_base="$5"
     local change_log_file="$6"
@@ -308,12 +308,37 @@ process_vps_worker() {
     wlog_mask_url() {
         echo "$1" | sed -E 's/(adminapikey=)[^&]*/\1REDACTED/g; s/(adminapipass=)[^&]*/\1REDACTED/g'
     }
+    normalize_bw_int() {
+        local raw="$1"
+        local label="$2"
+        local val
+
+        if [[ -z "$raw" || "$raw" == "null" ]]; then
+            raw="0"
+        fi
+
+        if [[ ! "$raw" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+            wlog_error "$label value '$raw' is not numeric; defaulting to 0"
+            echo 0
+            return 0
+        fi
+
+        val=$(awk -v v="$raw" 'BEGIN{iv=int(v); if (v<0 && v!=iv) iv=iv-1; printf "%d", iv}')
+        if [[ "$raw" == *.* && "$raw" != "$val" ]]; then
+            wlog_info "$label normalized: $raw -> $val (truncated decimals)"
+        fi
+
+        echo "$val"
+    }
 
     if [[ "${CURL_INSECURE:-0}" == "1" ]]; then
         curl_insecure="--insecure"
     fi
 
     wlog_info "─ VPS $vpsid"
+    local limit used
+    limit=$(normalize_bw_int "$limit_raw" "limit")
+    used=$(normalize_bw_int "$used_raw" "used")
 
     # Logic
     if (( limit == 0 )); then
