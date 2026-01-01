@@ -208,28 +208,40 @@ process_vps_worker() {
     local api_base="$5"
     local log_file="$6"
     local change_log_file="$7"
+    local curl_insecure=""
+
+    wlog_info() {
+        echo "$(date '+%F %T') [INFO]  $*"
+    }
+    wlog_error() {
+        echo "$(date '+%F %T') [ERROR] $*"
+    }
+
+    if [[ "${CURL_INSECURE:-0}" == "1" ]]; then
+        curl_insecure="--insecure"
+    fi
 
     # Redirect output to log file
     exec > "$log_file" 2>&1
 
-    log_info "─ VPS $vpsid"
+    wlog_info "─ VPS $vpsid"
 
     # Logic
     if (( limit == 0 )); then
-        log_info "$vpsid → unlimited plan. Resetting usage only."
+        wlog_info "$vpsid → unlimited plan. Resetting usage only."
         local res
-        res=$(curl -sS $(curl_insecure_flag) -X POST "${api_base}&act=vs&bwreset=${vpsid}&api=json")
+        res=$(curl -sS $curl_insecure -X POST "${api_base}&act=vs&bwreset=${vpsid}&api=json")
         if echo "$res" | jq -e '.done // 0' | grep -q 1; then
-            log_info "$vpsid → usage reset OK"
+            wlog_info "$vpsid → usage reset OK"
         else
-            log_error "$vpsid → reset failed: $res"
+            wlog_error "$vpsid → reset failed: $res"
             return 1
         fi
         return 0
     fi
 
     if (( limit > 0 )) && (( used > limit )); then
-        log_info "$vpsid : used ($used) > limit ($limit) — skipping"
+        wlog_info "$vpsid : used ($used) > limit ($limit) — skipping"
         local date_str
         date_str=$(date '+%F %T')
         printf "%s  VPS %s  SKIPPED used=%d limit=%d (plan %d)\n" "$date_str" "$vpsid" "$used" "$limit" "$plid" >> "$change_log_file"
@@ -243,31 +255,31 @@ process_vps_worker() {
         new_limit=$(( limit - used ))
     fi
 
-    log_info "$vpsid : ${used}/${limit} GB → 0/${new_limit} GB"
+    wlog_info "$vpsid : ${used}/${limit} GB → 0/${new_limit} GB"
 
     # Reset
     local res
-    res=$(curl -sS $(curl_insecure_flag) -X POST "${api_base}&act=vs&bwreset=${vpsid}&api=json")
+    res=$(curl -sS $curl_insecure -X POST "${api_base}&act=vs&bwreset=${vpsid}&api=json")
     if ! echo "$res" | jq -e '.done // 0' | grep -q 1; then
-        log_error "$vpsid → reset failed: $res"
+        wlog_error "$vpsid → reset failed: $res"
         return 1
     fi
 
     # Update
     local u_res
-    u_res=$(curl -sS $(curl_insecure_flag) -d "editvps=1" -d "bandwidth=$new_limit" -d "plid=${plid}" "${api_base}&act=managevps&vpsid=${vpsid}&api=json")
+    u_res=$(curl -sS $curl_insecure -d "editvps=1" -d "bandwidth=$new_limit" -d "plid=${plid}" "${api_base}&act=managevps&vpsid=${vpsid}&api=json")
 
     if echo "$u_res" | jq -e '.done.done // false' | grep -q true; then
-        log_info "Limit updated (plan $plid preserved)"
+        wlog_info "Limit updated (plan $plid preserved)"
         local date_str
         date_str=$(date '+%F %T')
         printf "%s  VPS %s  %d/%d => 0/%d (plan %d)\n" "$date_str" "$vpsid" "$used" "$limit" "$new_limit" "$plid" >> "$change_log_file"
     else
-        log_error "$vpsid → update failed: $u_res"
+        wlog_error "$vpsid → update failed: $u_res"
         return 1
     fi
 }
-export -f process_vps_worker log_info log_error curl_insecure_flag
+export -f process_vps_worker
 
 worker_wrapper() {
     # Unpack line: "101 1000 500 1"
@@ -326,7 +338,7 @@ run_reset() {
     # We strip trailing empty lines to avoid issues with read
     local xargs_status=0
     set +e
-    grep -v '^$' "$worklist" | xargs -P "$PARALLEL_JOBS" -L 1 -I {} bash -c 'worker_wrapper "$1"' _ "{}"
+    grep -v '^$' "$worklist" | xargs -P "$PARALLEL_JOBS" -I {} bash -c 'worker_wrapper "$1"' _ "{}"
     xargs_status=$?
     set -e
     if (( xargs_status != 0 )); then
@@ -339,7 +351,9 @@ run_reset() {
     local vps_log
     if compgen -G "$LOGS_DIR/*.log" > /dev/null; then
         for vps_log in "$LOGS_DIR"/*.log; do
-            if grep -q "\[ERROR\]" "$vps_log"; then
+            if [[ ! -s "$vps_log" ]]; then
+                ((failed_count++))
+            elif grep -q "\[ERROR\]" "$vps_log"; then
                 ((failed_count++))
             elif grep -q "skipping" "$vps_log"; then
                 ((skipped_count++))
