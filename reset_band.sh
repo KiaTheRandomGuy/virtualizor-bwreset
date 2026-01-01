@@ -366,6 +366,34 @@ run_manual_reset() {
     return 1
 }
 
+whiptail_supports_programbox() {
+    local help_out
+    help_out=$(whiptail --help 2>&1 || true)
+    if echo "$help_out" | grep -q -- '--programbox'; then
+        return 0
+    fi
+    return 1
+}
+
+run_manual_reset_ui() {
+    local target="$1"
+    local label="$2"
+
+    if whiptail_supports_programbox; then
+        {
+            run_manual_reset "$target" "$label" && echo "Success" || echo "Failed"
+        } 2>&1 | tee -a "$LOG_FILE" | whiptail --programbox "Running..." 20 78 || true
+        return 0
+    fi
+
+    log_info "whiptail lacks --programbox; falling back to console output."
+    {
+        run_manual_reset "$target" "$label" && echo "Success" || echo "Failed"
+    } 2>&1 | tee -a "$LOG_FILE" || true
+    whiptail --msgbox "Done. See $LOG_FILE for details." 8 78
+    return 0
+}
+
 # --- Menus ---
 menu_manual() {
     local choice
@@ -377,9 +405,7 @@ menu_manual() {
         1)
             if whiptail --yesno "Reset ALL VPS bandwidth?" 8 78; then
                 > "$LOG_FILE"
-                {
-                    run_manual_reset "all" "all VPSs" && echo "Success" || echo "Failed"
-                } 2>&1 | tee -a "$LOG_FILE" | whiptail --programbox "Running..." 20 78
+                run_manual_reset_ui "all" "all VPSs"
             fi
             ;;
         2)
@@ -387,9 +413,7 @@ menu_manual() {
             vid=$(whiptail --inputbox "Enter VPS ID:" 8 78 3>&1 1>&2 2>&3) || return
             if [[ -n "$vid" ]]; then
                 > "$LOG_FILE"
-                 {
-                    run_manual_reset "$vid" "VPS $vid" && echo "Success" || echo "Failed"
-                } 2>&1 | tee -a "$LOG_FILE" | whiptail --programbox "Running..." 20 78
+                run_manual_reset_ui "$vid" "VPS $vid"
             fi
             ;;
     esac
