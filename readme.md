@@ -54,6 +54,7 @@ API_BASE=""
 PARALLEL_JOBS=5
 CURL_INSECURE=0
 LOG_API_RESPONSES=1
+REPORT_FILE="/root/virtualizor-bwreset/vps_report.txt"
 ```
 
 3. Run the script: `/root/vps_manager.sh`
@@ -62,6 +63,7 @@ Your credentials are now saved, and you can proceed to use the other script feat
 
 If your Virtualizor uses a certificate that does not match the IP/host, set `CURL_INSECURE=1` to bypass TLS verification (not recommended).
 Set `LOG_API_RESPONSES=0` if you want less verbose API logging.
+Set `REPORT_FILE` to point at your `vps_report.txt` if it lives elsewhere.
 
 ## 🔁 Update
 
@@ -73,7 +75,7 @@ git -C /root/virtualizor-bwreset pull
 
 * **Configure:** Edit your API credentials.
 
-* **Manual Reset:** Immediately run the bandwidth carry-over for all servers or a specific VPS ID. The results of the operation will be displayed on screen.
+* **Manual Reset:** Uses `vps_report.txt` to set each VPS limit to the reported remaining bandwidth. If the remaining value is `0`, it sets the limit to `1 GB` (to avoid unlimited). VPSs with unlimited limits (`0`) are still reset.
 
 * **Manage Automation:**
 

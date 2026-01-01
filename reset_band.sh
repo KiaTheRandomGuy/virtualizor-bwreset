@@ -8,6 +8,13 @@
 
 set -euo pipefail
 
+# Resolve script directory for default report file path.
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+    SCRIPT_SOURCE=$(readlink -f "$SCRIPT_SOURCE" 2>/dev/null || echo "$SCRIPT_SOURCE")
+fi
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+
 # --- Configuration & Constants ---
 CONFIG_FILE="${CONFIG_FILE:-/etc/vps_manager.conf}"
 CRON_TAG="# vps-bandwidth-reset-cron"
@@ -16,6 +23,7 @@ DIAG_DIR="${DIAG_DIR:-/root}"
 LOG_FILE="${DIAG_DIR}/reset_band.log"
 CHANGE_LOG="${DIAG_DIR}/reset_band_changes.log"
 TEMP_DIR="/tmp/vps_manager_$(date +%s)_$$"
+REPORT_FILE="${REPORT_FILE:-${SCRIPT_DIR}/vps_report.txt}"
 
 # Default configuration values
 DEFAULT_JOBS=5
@@ -47,6 +55,13 @@ log_info() {
 }
 log_error() {
     echo "$(date '+%F %T') [ERROR] $*" >&2
+}
+
+trim() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    echo "$s"
 }
 
 mask_api_url() {
@@ -97,8 +112,11 @@ load_config() {
     if [[ "${LOG_API_RESPONSES:-1}" != "1" ]]; then
         LOG_API_RESPONSES=0
     fi
+    if [[ -z "${REPORT_FILE:-}" ]]; then
+        REPORT_FILE="${SCRIPT_DIR}/vps_report.txt"
+    fi
     LOG_API_MAX_CHARS="${LOG_API_MAX_CHARS:-2000}"
-    export CURL_INSECURE LOG_API_RESPONSES LOG_API_MAX_CHARS
+    export CURL_INSECURE LOG_API_RESPONSES LOG_API_MAX_CHARS REPORT_FILE
     return 0
 }
 
@@ -116,6 +134,8 @@ PARALLEL_JOBS=5
 CURL_INSECURE=0
 # Optional: set to 1 to log API responses (can be verbose)
 LOG_API_RESPONSES=1
+# Optional: path to report file for manual reset
+REPORT_FILE=""
 EOF
 }
 
@@ -126,14 +146,16 @@ configure_script_ui() {
     local current_jobs="${PARALLEL_JOBS:-$DEFAULT_JOBS}"
     local current_insecure="${CURL_INSECURE:-0}"
     local current_log_api="${LOG_API_RESPONSES:-1}"
+    local current_report_file="${REPORT_FILE:-${SCRIPT_DIR}/vps_report.txt}"
 
-    local new_host new_key new_pass new_jobs new_insecure new_log_api
+    local new_host new_key new_pass new_jobs new_insecure new_log_api new_report_file
     new_host=$(whiptail --title "Configure Host" --inputbox "Virtualizor Host IP:" 8 78 "$current_host" 3>&1 1>&2 2>&3) || return 0
     new_key=$(whiptail --title "Configure API Key" --inputbox "API Key:" 8 78 "$current_key" 3>&1 1>&2 2>&3) || return 0
     new_pass=$(whiptail --title "Configure API Pass" --inputbox "API Password:" 8 78 "$current_pass" 3>&1 1>&2 2>&3) || return 0
     new_jobs=$(whiptail --title "Parallel Jobs" --inputbox "Number of parallel jobs:" 8 78 "$current_jobs" 3>&1 1>&2 2>&3) || return 0
     new_insecure=$(whiptail --title "TLS Verification" --inputbox "Disable TLS verification? (0 or 1):" 8 78 "$current_insecure" 3>&1 1>&2 2>&3) || return 0
     new_log_api=$(whiptail --title "API Logging" --inputbox "Log API responses? (0 or 1):" 8 78 "$current_log_api" 3>&1 1>&2 2>&3) || return 0
+    new_report_file=$(whiptail --title "Report File" --inputbox "Path to vps_report.txt (blank = default):" 8 78 "$current_report_file" 3>&1 1>&2 2>&3) || return 0
 
     cat > "$CONFIG_FILE" <<EOF
 HOST="$new_host"
@@ -143,6 +165,7 @@ API_BASE=""
 PARALLEL_JOBS=$new_jobs
 CURL_INSECURE=$new_insecure
 LOG_API_RESPONSES=$new_log_api
+REPORT_FILE="$new_report_file"
 EOF
     whiptail --msgbox "Configuration saved to $CONFIG_FILE" 8 78
 }
@@ -200,6 +223,54 @@ api_request() {
     fi
 
     printf '%s' "$curl_out"
+}
+
+build_report_map() {
+    local report_file="$1"
+    local map_file="$2"
+
+    if [[ ! -f "$report_file" ]]; then
+        log_error "Report file not found: $report_file"
+        return 1
+    fi
+
+    : > "$map_file"
+    local line ips_part remaining_raw
+    local count=0
+
+    while IFS= read -r line; do
+        [[ "$line" == *"|"* ]] || continue
+        [[ "$line" == *"- "* ]] || continue
+
+        local after_dash="${line#*- }"
+        ips_part="${after_dash%%|*}"
+        ips_part="$(trim "$ips_part")"
+        [[ -z "$ips_part" ]] && continue
+
+        local last_field="${line##*|}"
+        remaining_raw="${last_field#*:}"
+        remaining_raw="${remaining_raw%%GB*}"
+        remaining_raw="$(trim "$remaining_raw")"
+        [[ -z "$remaining_raw" ]] && continue
+
+        local ip
+        local ip_list
+        IFS=',' read -ra ip_list <<< "$ips_part"
+        for ip in "${ip_list[@]}"; do
+            ip="$(trim "$ip")"
+            [[ -z "$ip" ]] && continue
+            printf "%s|%s\n" "$ip" "$remaining_raw" >> "$map_file"
+            ((count++))
+        done
+    done < "$report_file"
+
+    if (( count == 0 )); then
+        log_error "No report entries found in $report_file"
+        return 1
+    fi
+
+    log_info "Report map loaded: $count IP entries from $report_file"
+    return 0
 }
 
 # --- VPS Data Fetching ---
@@ -433,7 +504,240 @@ process_vps_worker() {
         return 1
     fi
 }
-export -f process_vps_worker
+
+process_vps_worker_report() {
+    local vpsid="$1"
+    local limit_raw="$2"
+    local plid="$3"
+    local iplist="$4"
+    local api_base="$5"
+    local report_map_file="$6"
+    local change_log_file="$7"
+    local curl_insecure=""
+
+    wlog_info() {
+        echo "$(date '+%F %T') [INFO]  $*" >&2
+    }
+    wlog_error() {
+        echo "$(date '+%F %T') [ERROR] $*" >&2
+    }
+    wlog_payload() {
+        local label="$1"
+        local payload="${2:-}"
+        local max="${LOG_API_MAX_CHARS:-2000}"
+        local len=${#payload}
+
+        if (( len == 0 )); then
+            wlog_info "$label (empty)"
+            return 0
+        fi
+
+        if (( len > max )); then
+            wlog_info "$label (truncated, ${len} chars)"
+            payload="${payload:0:max}"
+        else
+            wlog_info "$label (${len} chars)"
+        fi
+
+        while IFS= read -r line; do
+            wlog_info "$line"
+        done <<< "$payload"
+    }
+    wlog_mask_url() {
+        echo "$1" | sed -E 's/(adminapikey=)[^&]*/\1REDACTED/g; s/(adminapipass=)[^&]*/\1REDACTED/g'
+    }
+    wtrim() {
+        local s="$1"
+        s="${s#"${s%%[![:space:]]*}"}"
+        s="${s%"${s##*[![:space:]]}"}"
+        echo "$s"
+    }
+    normalize_int() {
+        local raw="$1"
+        local label="$2"
+        local val
+
+        if [[ -z "$raw" || "$raw" == "null" ]]; then
+            raw="0"
+        fi
+
+        if [[ ! "$raw" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+            wlog_error "$label value '$raw' is not numeric; defaulting to 0"
+            echo 0
+            return 0
+        fi
+
+        val=$(awk -v v="$raw" 'BEGIN{iv=int(v); if (v<0 && v!=iv) iv=iv-1; printf "%d", iv}')
+        if [[ "$raw" == *.* && "$raw" != "$val" ]]; then
+            wlog_info "$label normalized: $raw -> $val (truncated decimals)"
+        fi
+
+        echo "$val"
+    }
+    normalize_remaining() {
+        local raw="$1"
+        local val lt1
+
+        raw="$(wtrim "$raw")"
+        if [[ "$raw" == "نامحدود" ]]; then
+            echo "unlimited"
+            return 0
+        fi
+        if [[ ! "$raw" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+            wlog_error "remaining value '$raw' is not numeric"
+            return 1
+        fi
+
+        read -r val lt1 < <(awk -v v="$raw" 'BEGIN{iv=int(v); if (v<0 && v!=iv) iv=iv-1; lt1=(v>0 && v<1)?1:0; printf "%d %d", iv, lt1}')
+        if [[ "$raw" == *.* && "$raw" != "$val" ]]; then
+            wlog_info "remaining normalized: $raw -> $val (truncated decimals)"
+        fi
+        if (( lt1 == 1 )); then
+            wlog_info "remaining < 1 GB; using 1 GB to avoid unlimited"
+            val=1
+        fi
+        if (( val <= 0 )); then
+            wlog_info "remaining <= 0 GB; using 1 GB to avoid unlimited"
+            val=1
+        fi
+        echo "$val"
+    }
+    lookup_report_remaining() {
+        local ips="$1"
+        local map_file="$2"
+        local ip rem
+
+        IFS=',' read -ra ip_list <<< "$ips"
+        for ip in "${ip_list[@]}"; do
+            ip="$(wtrim "$ip")"
+            [[ -z "$ip" ]] && continue
+            rem=$(awk -F'|' -v ip="$ip" '$1==ip {print $2; exit}' "$map_file")
+            if [[ -n "$rem" ]]; then
+                echo "${ip}|${rem}"
+                return 0
+            fi
+        done
+        return 1
+    }
+
+    if [[ "${CURL_INSECURE:-0}" == "1" ]]; then
+        curl_insecure="--insecure"
+    fi
+
+    wlog_info "─ VPS $vpsid"
+    if [[ ! -f "$report_map_file" ]]; then
+        wlog_error "Report map missing: $report_map_file"
+        return 1
+    fi
+    if [[ -z "$iplist" ]]; then
+        wlog_error "No IPs found for VPS $vpsid"
+        return 1
+    fi
+
+    local limit
+    limit=$(normalize_int "$limit_raw" "limit")
+
+    local match_ip=""
+    local remaining_raw=""
+    local match
+    if match=$(lookup_report_remaining "$iplist" "$report_map_file"); then
+        match_ip="${match%%|*}"
+        remaining_raw="${match#*|}"
+        wlog_info "$vpsid → report match: $match_ip remaining=$remaining_raw"
+    else
+        if (( limit == 0 )); then
+            wlog_info "$vpsid → no report entry for IPs ($iplist); continuing with reset only"
+        else
+            wlog_error "$vpsid → no report entry for IPs ($iplist)"
+            return 1
+        fi
+    fi
+
+    if (( limit == 0 )); then
+        wlog_info "$vpsid → unlimited plan (limit=0). Resetting usage only."
+        local res curl_status
+        set +e
+        local reset_url="${api_base}&act=vs&bwreset=${vpsid}&api=json"
+        wlog_info "$vpsid → reset request: $(wlog_mask_url "$reset_url")"
+        res=$(curl -sS $curl_insecure -X POST "$reset_url" 2>&1)
+        curl_status=$?
+        set -e
+        if (( curl_status != 0 )); then
+            wlog_error "$vpsid → reset failed (curl exit $curl_status)"
+            wlog_payload "$vpsid → reset error response" "$res"
+            return 1
+        fi
+        if [[ "${LOG_API_RESPONSES:-1}" == "1" ]]; then
+            wlog_payload "$vpsid → reset response" "$res"
+        fi
+        if echo "$res" | jq -e '.done // 0' | grep -q 1; then
+            wlog_info "$vpsid → usage reset OK"
+        else
+            wlog_error "$vpsid → reset failed: $res"
+            return 1
+        fi
+        return 0
+    fi
+
+    if [[ -z "$remaining_raw" || "$remaining_raw" == "نامحدود" ]]; then
+        wlog_error "$vpsid → report remaining is unlimited or missing; refusing to set limit"
+        return 1
+    fi
+
+    local remaining
+    remaining=$(normalize_remaining "$remaining_raw") || return 1
+    wlog_info "$vpsid → setting limit to remaining: $remaining GB"
+
+    # Reset
+    local res curl_status
+    set +e
+    local reset_url="${api_base}&act=vs&bwreset=${vpsid}&api=json"
+    wlog_info "$vpsid → reset request: $(wlog_mask_url "$reset_url")"
+    res=$(curl -sS $curl_insecure -X POST "$reset_url" 2>&1)
+    curl_status=$?
+    set -e
+    if (( curl_status != 0 )); then
+        wlog_error "$vpsid → reset failed (curl exit $curl_status)"
+        wlog_payload "$vpsid → reset error response" "$res"
+        return 1
+    fi
+    if [[ "${LOG_API_RESPONSES:-1}" == "1" ]]; then
+        wlog_payload "$vpsid → reset response" "$res"
+    fi
+    if ! echo "$res" | jq -e '.done // 0' | grep -q 1; then
+        wlog_error "$vpsid → reset failed: $res"
+        return 1
+    fi
+
+    # Update
+    local u_res
+    set +e
+    local update_url="${api_base}&act=managevps&vpsid=${vpsid}&api=json"
+    local update_payload="editvps=1 bandwidth=$remaining plid=$plid"
+    wlog_info "$vpsid → update request: $(wlog_mask_url "$update_url") payload: $update_payload"
+    u_res=$(curl -sS $curl_insecure -d "editvps=1" -d "bandwidth=$remaining" -d "plid=${plid}" "$update_url" 2>&1)
+    curl_status=$?
+    set -e
+    if (( curl_status != 0 )); then
+        wlog_error "$vpsid → update failed (curl exit $curl_status)"
+        wlog_payload "$vpsid → update error response" "$u_res"
+        return 1
+    fi
+    if [[ "${LOG_API_RESPONSES:-1}" == "1" ]]; then
+        wlog_payload "$vpsid → update response" "$u_res"
+    fi
+
+    if echo "$u_res" | jq -e '.done.done // false' | grep -q true; then
+        wlog_info "Limit updated (plan $plid preserved)"
+        local date_str
+        date_str=$(date '+%F %T')
+        printf "%s  VPS %s  => 0/%d (plan %d)\n" "$date_str" "$vpsid" "$remaining" "$plid" >> "$change_log_file"
+    else
+        wlog_error "$vpsid → update failed: $u_res"
+        return 1
+    fi
+}
+export -f process_vps_worker process_vps_worker_report
 
 worker_wrapper() {
     # Unpack line: "101 1000 500 1"
@@ -468,6 +772,40 @@ worker_wrapper() {
     } > "$log_file" 2>&1
 }
 export -f worker_wrapper
+
+report_worker_wrapper() {
+    # Unpack line: "101 1000 1 89.235.118.201"
+    read -r vpsid limit plid iplist <<< "$1"
+    local logs_dir="${LOGS_DIR:-}"
+    local change_logs_dir="${CHANGE_LOGS_DIR:-}"
+
+    if [[ -z "$vpsid" ]]; then
+        echo "$(date '+%F %T') [ERROR] Invalid worklist line: '$1'"
+        return 1
+    fi
+    if [[ -z "$logs_dir" || -z "$change_logs_dir" ]]; then
+        echo "$(date '+%F %T') [ERROR] LOGS_DIR/CHANGE_LOGS_DIR not set."
+        return 1
+    fi
+
+    local log_file="${logs_dir}/${vpsid}.log"
+    local change_log_file="${change_logs_dir}/${vpsid}.log"
+
+    {
+        echo "$(date '+%F %T') [INFO]  Worker start: vpsid=$vpsid limit=$limit plid=$plid ips=$iplist"
+        set +e
+        process_vps_worker_report "$vpsid" "$limit" "$plid" "$iplist" "$API_BASE_VAL" "$REPORT_MAP_FILE" "$change_log_file"
+        local status=$?
+        set -e
+        if (( status != 0 )); then
+            echo "$(date '+%F %T') [ERROR] WORKER_EXIT=$status"
+        else
+            echo "$(date '+%F %T') [INFO]  WORKER_EXIT=0"
+        fi
+        exit $status
+    } > "$log_file" 2>&1
+}
+export -f report_worker_wrapper
 
 # --- Main Reset Orchestrator ---
 run_reset() {
@@ -588,12 +926,132 @@ run_reset() {
     return 0
 }
 
+run_manual_reset_report() {
+    local target="$1" # "all" or vpsid
+    local api_base
+    api_base=$(get_api_base)
+
+    log_info "API base: $(mask_api_url "$api_base")"
+    log_info "Manual reset using report file: $REPORT_FILE"
+    if [[ "${LOG_API_RESPONSES:-1}" == "1" ]]; then
+        log_info "API response logging enabled."
+    fi
+
+    local report_map="${TEMP_DIR}/report_map.txt"
+    if ! build_report_map "$REPORT_FILE" "$report_map"; then
+        return 1
+    fi
+
+    log_info "Fetching VPS data..."
+    local vs_json
+    vs_json=$(fetch_vps_data "$api_base") || return 1
+
+    mkdir -p "$TEMP_DIR"
+    local worklist="${TEMP_DIR}/worklist.txt"
+    local jq_iplist='def iplist: ([.ip] + (if (.ips? // empty) != "" then (if (.ips|type=="array") then .ips elif (.ips|type=="object") then (.ips|keys) else [] end) else [] end)) | map(select(. != null and . != "")) | unique | join(",");'
+
+    if [[ "$target" == "all" ]]; then
+        echo "$vs_json" | jq -r "${jq_iplist} .vs[] | \"\\(.vpsid) \\(.bandwidth//0) \\(.plid//0) \\(iplist)\"" > "$worklist"
+    else
+        echo "$vs_json" | jq -r --arg id "$target" "${jq_iplist} .vs[\$id] | \"\\(.vpsid) \\(.bandwidth//0) \\(.plid//0) \\(iplist)\"" > "$worklist"
+        if grep -q "null" "$worklist" || [[ ! -s "$worklist" ]]; then
+             log_error "VPS $target not found in list."
+             return 1
+        fi
+    fi
+
+    local count
+    count=$(wc -l < "$worklist")
+    if (( count == 0 )); then
+        log_info "No VPS to process."
+        return 0
+    fi
+
+    log_info "Processing $count VPS(s) with $PARALLEL_JOBS jobs..."
+
+    # Setup log dirs
+    export LOGS_DIR="${TEMP_DIR}/logs"
+    export CHANGE_LOGS_DIR="${TEMP_DIR}/changelogs"
+    export API_BASE_VAL="$api_base"
+    export REPORT_MAP_FILE="$report_map"
+    mkdir -p "$LOGS_DIR" "$CHANGE_LOGS_DIR"
+
+    # Execute
+    # We strip trailing empty lines to avoid issues with read
+    local xargs_status=0
+    local xargs_err="${TEMP_DIR}/xargs.err"
+    : > "$xargs_err"
+    set +e
+    grep -v '^$' "$worklist" | xargs -P "$PARALLEL_JOBS" -I {} bash -c 'report_worker_wrapper "$1"' _ "{}" 2> "$xargs_err"
+    xargs_status=$?
+    set -e
+    if (( xargs_status != 0 )); then
+        log_error "One or more VPS operations failed (xargs exit $xargs_status)."
+    fi
+    if [[ -s "$xargs_err" ]]; then
+        log_payload "xargs stderr" "$(cat "$xargs_err")"
+    fi
+
+    local success_count=0
+    local skipped_count=0
+    local failed_count=0
+    local vps_log
+    if compgen -G "$LOGS_DIR/*.log" > /dev/null; then
+        for vps_log in "$LOGS_DIR"/*.log; do
+            if [[ ! -s "$vps_log" ]]; then
+                ((failed_count++))
+                continue
+            fi
+
+            local worker_exit
+            worker_exit=$(awk -F= '/WORKER_EXIT=/ {print $2; exit}' "$vps_log")
+            if [[ -z "$worker_exit" ]]; then
+                ((failed_count++))
+                continue
+            fi
+
+            if (( worker_exit != 0 )); then
+                ((failed_count++))
+            elif grep -q "SKIPPED" "$vps_log" || grep -q "skipping" "$vps_log"; then
+                ((skipped_count++))
+            else
+                ((success_count++))
+            fi
+        done
+    else
+        log_error "No per-VPS logs were generated."
+        failed_count=$count
+    fi
+
+    # Aggregate logs
+    log_info "Aggregating logs..."
+    if ls "$LOGS_DIR"/*.log >/dev/null 2>&1; then
+        cat "$LOGS_DIR"/*.log >> "$LOG_FILE"
+    fi
+    if ls "$CHANGE_LOGS_DIR"/*.log >/dev/null 2>&1; then
+        cat "$CHANGE_LOGS_DIR"/*.log >> "$CHANGE_LOG"
+    fi
+
+    log_info "Summary: total=$count success=$success_count skipped=$skipped_count failed=$failed_count"
+    if (( failed_count > 0 )); then
+        log_error "Run completed with failures. Check $LOG_FILE for details."
+    elif (( xargs_status != 0 )); then
+        log_error "xargs reported a failure, but no failed workers were detected."
+    fi
+
+    log_info "Done."
+    if (( failed_count > 0 )) || (( xargs_status != 0 )); then
+        return 1
+    fi
+    return 0
+}
+
 run_manual_reset() {
     local target="$1"
     local label="$2"
 
     log_info "Manual reset started: $label"
-    if run_reset "$target"; then
+    if run_manual_reset_report "$target"; then
         log_info "Manual reset completed: $label"
         return 0
     fi
