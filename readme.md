@@ -18,41 +18,51 @@ A user-friendly, menu-driven command-line tool to automate the process of resett
 
 * **Full Automation:** Easily set up, view, and remove daily or monthly cron jobs.
 
-* **Safe & Robust:** Includes dependency checks, robust error handling, and detailed logging to `/tmp/reset_band.log`.
+* **Safe & Robust:** Includes dependency checks, robust error handling, and detailed logging to `/root/reset_band.log` (override with `DIAG_DIR`).
 
-## 🚀 Installation
+## 🚀 Installation (Git Clone)
 
-Use one of the following one-line commands to download the script to `/root/`, make it executable, and run it for the first time.
+This keeps the script updateable via `git pull`.
 
-**Using `wget`:**
+1. Clone the repo:
 ```
-wget -O /root/vps_manager.sh \
-  https://raw.githubusercontent.com/LivingG0D/virtualizor-bwreset/refs/heads/main/reset_band.sh && \
-chmod +x /root/vps_manager.sh && \
-/root/vps_manager.sh
-
+git clone https://github.com/KiaTheRandomGuy/virtualizor-bwreset.git /root/virtualizor-bwreset
 ```
 
-**Using `curl`:**
+2. Make the script executable:
 ```
-curl -L -o /root/vps_manager.sh \
-  https://raw.githubusercontent.com/LivingG0D/virtualizor-bwreset/refs/heads/main/reset_band.sh && \
-chmod +x /root/vps_manager.sh && \
-/root/vps_manager.sh
+chmod +x /root/virtualizor-bwreset/reset_band.sh
+```
 
+3. Create a stable command path (optional but recommended):
+```
+ln -sf /root/virtualizor-bwreset/reset_band.sh /root/vps_manager.sh
 ```
 
 ## ⚙️ First-Time Setup
 
-The first time you run the script, it will automatically create a configuration file at `/etc/vps_manager.conf`.
+The script uses a configuration file at `/etc/vps_manager.conf`. You can create it manually (or let the script create it on first run) so updates to the repo never overwrite your settings.
 
-1. Run the script: `/root/vps_manager.sh`
+1. Create or open the config: `nano /etc/vps_manager.conf`
 
-2. Select **1. Configure Script** from the main menu.
+2. Set your values:
+```
+HOST="your-virtualizor-host"
+KEY="your-api-key"
+PASS="your-api-pass"
+API_BASE=""
+PARALLEL_JOBS=5
+```
 
-3. Enter your Virtualizor Host IP, API Key, and API Password.
+3. Run the script: `/root/vps_manager.sh`
 
 Your credentials are now saved, and you can proceed to use the other script features.
+
+## 🔁 Update
+
+```
+git -C /root/virtualizor-bwreset pull
+```
 
 ## 🔧 Usage
 
@@ -72,11 +82,11 @@ Your credentials are now saved, and you can proceed to use the other script feat
 
 ## 📝 Logging
 
-The script generates two log files in the `/tmp/` directory for easy debugging and auditing:
+The script generates two log files in the `/root/` directory by default (set `DIAG_DIR` to change the location):
 
-* `/tmp/reset_band.log`: A detailed, verbose log of all actions.
+* `/root/reset_band.log`: A detailed, verbose log of all actions.
 
-* `/tmp/reset_band_changes.log`: A clean audit log that only contains entries for successfully processed servers.
+* `/root/reset_band_changes.log`: A clean audit log that only contains entries for successfully processed servers.
 ## 📜 License
 
 This project is licensed under the Apache-2.0 License.

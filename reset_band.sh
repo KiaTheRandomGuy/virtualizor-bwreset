@@ -317,6 +317,20 @@ run_reset() {
     log_info "Done."
 }
 
+run_manual_reset() {
+    local target="$1"
+    local label="$2"
+
+    log_info "Manual reset started: $label"
+    if run_reset "$target"; then
+        log_info "Manual reset completed: $label"
+        return 0
+    fi
+
+    log_error "Manual reset failed: $label"
+    return 1
+}
+
 # --- Menus ---
 menu_manual() {
     local choice
@@ -329,7 +343,7 @@ menu_manual() {
             if whiptail --yesno "Reset ALL VPS bandwidth?" 8 78; then
                 > "$LOG_FILE"
                 {
-                    run_reset "all" && echo "Success" || echo "Failed"
+                    run_manual_reset "all" "all VPSs" && echo "Success" || echo "Failed"
                 } 2>&1 | tee -a "$LOG_FILE" | whiptail --programbox "Running..." 20 78
             fi
             ;;
@@ -339,7 +353,7 @@ menu_manual() {
             if [[ -n "$vid" ]]; then
                 > "$LOG_FILE"
                  {
-                    run_reset "$vid" && echo "Success" || echo "Failed"
+                    run_manual_reset "$vid" "VPS $vid" && echo "Success" || echo "Failed"
                 } 2>&1 | tee -a "$LOG_FILE" | whiptail --programbox "Running..." 20 78
             fi
             ;;
