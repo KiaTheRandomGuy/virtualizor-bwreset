@@ -64,6 +64,7 @@ Your credentials are now saved, and you can proceed to use the other script feat
 If your Virtualizor uses a certificate that does not match the IP/host, set `CURL_INSECURE=1` to bypass TLS verification (not recommended).
 Set `LOG_API_RESPONSES=0` if you want less verbose API logging.
 Set `REPORT_FILE` to point at your `vps_report.txt` if it lives elsewhere.
+If an SSL error occurs, the script will retry once with `--insecure` and log a warning.
 
 ## 🔁 Update
 

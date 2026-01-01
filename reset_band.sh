@@ -212,6 +212,23 @@ api_request() {
     curl_status=$?
     set -e
 
+    if (( curl_status == 60 )) && [[ "${CURL_INSECURE:-0}" != "1" ]]; then
+        log_error "SSL verification failed; retrying with --insecure."
+        set +e
+        if [[ -n "$post_data" ]]; then
+            curl_out=$(curl -sS -L --max-redirs 5 --retry 3 --insecure -d "$post_data" "$url" 2>&1)
+        else
+            curl_out=$(curl -sS -L --max-redirs 5 --retry 3 --insecure "$url" 2>&1)
+        fi
+        curl_status=$?
+        set -e
+        if (( curl_status == 0 )); then
+            CURL_INSECURE=1
+            export CURL_INSECURE
+            log_info "TLS verification disabled for this run (CURL_INSECURE=1)."
+        fi
+    fi
+
     if (( curl_status != 0 )); then
         log_error "API $method failed (curl exit $curl_status)."
         log_payload "API error response for $safe_url" "$curl_out"
