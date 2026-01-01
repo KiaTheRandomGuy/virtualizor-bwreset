@@ -796,6 +796,7 @@ report_worker_wrapper() {
 
     {
         echo "$(date '+%F %T') [INFO]  Worker start: vpsid=$vpsid limit=$limit plid=$plid ips=$iplist"
+        echo "$(date '+%F %T') [INFO]  Panel IPs: $iplist"
         set +e
         process_vps_worker_report "$vpsid" "$limit" "$plid" "$iplist" "$API_BASE_VAL" "$REPORT_MAP_FILE" "$change_log_file"
         local status=$?
@@ -952,7 +953,15 @@ run_manual_reset_report() {
 
     mkdir -p "$TEMP_DIR"
     local worklist="${TEMP_DIR}/worklist.txt"
-    local jq_iplist='def iplist: ([.ip] + (if (.ips? // empty) != "" then (if (.ips|type=="array") then .ips elif (.ips|type=="object") then (.ips|keys) else [] end) else [] end)) | map(select(. != null and . != "")) | unique | join(",");'
+    local jq_iplist='def to_list(v):
+        if v == null then []
+        elif (v|type) == "string" then ([v] + (v|split(",")))
+        elif (v|type) == "array" then v
+        elif (v|type) == "object" then (v|keys)
+        else [] end;
+        def clean_ips(a):
+        a | map(tostring) | map(gsub("\\s+";"")) | map(select(test("^[0-9]{1,3}(\\.[0-9]{1,3}){3}$")));
+        def iplist: ([.ip] + to_list(.ips)) | clean_ips(.) | unique | join(",");'
 
     if [[ "$target" == "all" ]]; then
         echo "$vs_json" | jq -r "${jq_iplist} .vs[] | \"\\(.vpsid) \\(.bandwidth//0) \\(.plid//0) \\(iplist)\"" > "$worklist"
