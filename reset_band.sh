@@ -278,10 +278,10 @@ process_vps_worker() {
     local curl_insecure=""
 
     wlog_info() {
-        echo "$(date '+%F %T') [INFO]  $*"
+        echo "$(date '+%F %T') [INFO]  $*" >&2
     }
     wlog_error() {
-        echo "$(date '+%F %T') [ERROR] $*"
+        echo "$(date '+%F %T') [ERROR] $*" >&2
     }
     wlog_payload() {
         local label="$1"
