@@ -20,6 +20,8 @@ TEMP_DIR="/tmp/vps_manager_$(date +%s)_$$"
 # Default configuration values
 DEFAULT_JOBS=5
 CURL_INSECURE="${CURL_INSECURE:-0}"
+LOG_API_RESPONSES="${LOG_API_RESPONSES:-1}"
+LOG_API_MAX_CHARS="${LOG_API_MAX_CHARS:-2000}"
 
 # --- Dependencies Check ---
 check_dependencies() {
@@ -47,6 +49,34 @@ log_error() {
     echo "$(date '+%F %T') [ERROR] $*" >&2
 }
 
+mask_api_url() {
+    local url="$1"
+    echo "$url" | sed -E 's/(adminapikey=)[^&]*/\1REDACTED/g; s/(adminapipass=)[^&]*/\1REDACTED/g'
+}
+
+log_payload() {
+    local label="$1"
+    local payload="${2:-}"
+    local max="${LOG_API_MAX_CHARS:-2000}"
+    local len=${#payload}
+
+    if (( len == 0 )); then
+        log_info "$label (empty)"
+        return 0
+    fi
+
+    if (( len > max )); then
+        log_info "$label (truncated, ${len} chars)"
+        payload="${payload:0:max}"
+    else
+        log_info "$label (${len} chars)"
+    fi
+
+    while IFS= read -r line; do
+        echo "$(date '+%F %T') [INFO]  $line" >&2
+    done <<< "$payload"
+}
+
 curl_insecure_flag() {
     if [[ "${CURL_INSECURE:-0}" == "1" ]]; then
         printf '%s' "--insecure"
@@ -64,7 +94,10 @@ load_config() {
     if [[ "${CURL_INSECURE:-0}" != "1" ]]; then
         CURL_INSECURE=0
     fi
-    export CURL_INSECURE
+    if [[ "${LOG_API_RESPONSES:-1}" != "1" ]]; then
+        LOG_API_RESPONSES=0
+    fi
+    export CURL_INSECURE LOG_API_RESPONSES
     return 0
 }
 
@@ -80,6 +113,8 @@ API_BASE=""
 PARALLEL_JOBS=5
 # Optional: set to 1 to disable TLS cert verification (not recommended)
 CURL_INSECURE=0
+# Optional: set to 1 to log API responses (can be verbose)
+LOG_API_RESPONSES=1
 EOF
 }
 
@@ -89,13 +124,15 @@ configure_script_ui() {
     local current_pass="${PASS:-}"
     local current_jobs="${PARALLEL_JOBS:-$DEFAULT_JOBS}"
     local current_insecure="${CURL_INSECURE:-0}"
+    local current_log_api="${LOG_API_RESPONSES:-1}"
 
-    local new_host new_key new_pass new_jobs new_insecure
+    local new_host new_key new_pass new_jobs new_insecure new_log_api
     new_host=$(whiptail --title "Configure Host" --inputbox "Virtualizor Host IP:" 8 78 "$current_host" 3>&1 1>&2 2>&3) || return 0
     new_key=$(whiptail --title "Configure API Key" --inputbox "API Key:" 8 78 "$current_key" 3>&1 1>&2 2>&3) || return 0
     new_pass=$(whiptail --title "Configure API Pass" --inputbox "API Password:" 8 78 "$current_pass" 3>&1 1>&2 2>&3) || return 0
     new_jobs=$(whiptail --title "Parallel Jobs" --inputbox "Number of parallel jobs:" 8 78 "$current_jobs" 3>&1 1>&2 2>&3) || return 0
     new_insecure=$(whiptail --title "TLS Verification" --inputbox "Disable TLS verification? (0 or 1):" 8 78 "$current_insecure" 3>&1 1>&2 2>&3) || return 0
+    new_log_api=$(whiptail --title "API Logging" --inputbox "Log API responses? (0 or 1):" 8 78 "$current_log_api" 3>&1 1>&2 2>&3) || return 0
 
     cat > "$CONFIG_FILE" <<EOF
 HOST="$new_host"
@@ -104,6 +141,7 @@ PASS="$new_pass"
 API_BASE=""
 PARALLEL_JOBS=$new_jobs
 CURL_INSECURE=$new_insecure
+LOG_API_RESPONSES=$new_log_api
 EOF
     whiptail --msgbox "Configuration saved to $CONFIG_FILE" 8 78
 }
@@ -126,12 +164,41 @@ get_api_base() {
 api_request() {
     local url="$1"
     local post_data="${2:-}"
+    local method="GET"
+    local safe_url
+    safe_url=$(mask_api_url "$url")
 
     if [[ -n "$post_data" ]]; then
-        curl -sS -L --max-redirs 5 --retry 3 $(curl_insecure_flag) -d "$post_data" "$url"
+        method="POST"
+        log_info "API $method $safe_url"
+        if [[ "${LOG_API_RESPONSES:-1}" == "1" ]]; then
+            log_info "API POST data: $post_data"
+        fi
     else
-        curl -sS -L --max-redirs 5 --retry 3 $(curl_insecure_flag) "$url"
+        log_info "API $method $safe_url"
     fi
+
+    local curl_out curl_status
+    set +e
+    if [[ -n "$post_data" ]]; then
+        curl_out=$(curl -sS -L --max-redirs 5 --retry 3 $(curl_insecure_flag) -d "$post_data" "$url" 2>&1)
+    else
+        curl_out=$(curl -sS -L --max-redirs 5 --retry 3 $(curl_insecure_flag) "$url" 2>&1)
+    fi
+    curl_status=$?
+    set -e
+
+    if (( curl_status != 0 )); then
+        log_error "API $method failed (curl exit $curl_status)."
+        log_payload "API error response for $safe_url" "$curl_out"
+        return $curl_status
+    fi
+
+    if [[ "${LOG_API_RESPONSES:-1}" == "1" ]]; then
+        log_payload "API response for $safe_url" "$curl_out"
+    fi
+
+    printf '%s' "$curl_out"
 }
 
 # --- VPS Data Fetching ---
@@ -229,8 +296,18 @@ process_vps_worker() {
     # Logic
     if (( limit == 0 )); then
         wlog_info "$vpsid → unlimited plan. Resetting usage only."
-        local res
-        res=$(curl -sS $curl_insecure -X POST "${api_base}&act=vs&bwreset=${vpsid}&api=json")
+        local res curl_status
+        set +e
+        res=$(curl -sS $curl_insecure -X POST "${api_base}&act=vs&bwreset=${vpsid}&api=json" 2>&1)
+        curl_status=$?
+        set -e
+        if (( curl_status != 0 )); then
+            wlog_error "$vpsid → reset failed (curl exit $curl_status): $res"
+            return 1
+        fi
+        if [[ "${LOG_API_RESPONSES:-1}" == "1" ]]; then
+            wlog_info "$vpsid → reset response: $res"
+        fi
         if echo "$res" | jq -e '.done // 0' | grep -q 1; then
             wlog_info "$vpsid → usage reset OK"
         else
@@ -258,8 +335,18 @@ process_vps_worker() {
     wlog_info "$vpsid : ${used}/${limit} GB → 0/${new_limit} GB"
 
     # Reset
-    local res
-    res=$(curl -sS $curl_insecure -X POST "${api_base}&act=vs&bwreset=${vpsid}&api=json")
+    local res curl_status
+    set +e
+    res=$(curl -sS $curl_insecure -X POST "${api_base}&act=vs&bwreset=${vpsid}&api=json" 2>&1)
+    curl_status=$?
+    set -e
+    if (( curl_status != 0 )); then
+        wlog_error "$vpsid → reset failed (curl exit $curl_status): $res"
+        return 1
+    fi
+    if [[ "${LOG_API_RESPONSES:-1}" == "1" ]]; then
+        wlog_info "$vpsid → reset response: $res"
+    fi
     if ! echo "$res" | jq -e '.done // 0' | grep -q 1; then
         wlog_error "$vpsid → reset failed: $res"
         return 1
@@ -267,7 +354,17 @@ process_vps_worker() {
 
     # Update
     local u_res
-    u_res=$(curl -sS $curl_insecure -d "editvps=1" -d "bandwidth=$new_limit" -d "plid=${plid}" "${api_base}&act=managevps&vpsid=${vpsid}&api=json")
+    set +e
+    u_res=$(curl -sS $curl_insecure -d "editvps=1" -d "bandwidth=$new_limit" -d "plid=${plid}" "${api_base}&act=managevps&vpsid=${vpsid}&api=json" 2>&1)
+    curl_status=$?
+    set -e
+    if (( curl_status != 0 )); then
+        wlog_error "$vpsid → update failed (curl exit $curl_status): $u_res"
+        return 1
+    fi
+    if [[ "${LOG_API_RESPONSES:-1}" == "1" ]]; then
+        wlog_info "$vpsid → update response: $u_res"
+    fi
 
     if echo "$u_res" | jq -e '.done.done // false' | grep -q true; then
         wlog_info "Limit updated (plan $plid preserved)"
@@ -295,8 +392,12 @@ run_reset() {
     local api_base
     api_base=$(get_api_base)
 
+    log_info "API base: $(mask_api_url "$api_base")"
     if [[ "${CURL_INSECURE:-0}" == "1" ]]; then
         log_info "TLS verification disabled (CURL_INSECURE=1)."
+    fi
+    if [[ "${LOG_API_RESPONSES:-1}" == "1" ]]; then
+        log_info "API response logging enabled."
     fi
 
     log_info "Fetching VPS data..."

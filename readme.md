@@ -53,6 +53,7 @@ PASS="your-api-pass"
 API_BASE=""
 PARALLEL_JOBS=5
 CURL_INSECURE=0
+LOG_API_RESPONSES=1
 ```
 
 3. Run the script: `/root/vps_manager.sh`
@@ -60,6 +61,7 @@ CURL_INSECURE=0
 Your credentials are now saved, and you can proceed to use the other script features.
 
 If your Virtualizor uses a certificate that does not match the IP/host, set `CURL_INSECURE=1` to bypass TLS verification (not recommended).
+Set `LOG_API_RESPONSES=0` if you want less verbose API logging.
 
 ## 🔁 Update
 
